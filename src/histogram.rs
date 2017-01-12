@@ -1,8 +1,9 @@
 use itertools::{enumerate,multipeek,zip};
-use itertools::{Itertools,MultiPeek};
-use ndarray::Array1;
+use itertools::MultiPeek;
+use ndarray::prelude::*;
+use ndarray::{Iter,IterMut};
+use ndarray::{Data,DataClone,DataMut,DataOwned};
 use streaming_iterator::StreamingIterator;
-use std::slice::{Iter,IterMut};
 
 /// A 1D histogram
 ///
@@ -15,37 +16,44 @@ use std::slice::{Iter,IterMut};
 /// $$
 /// y_i ≤ x < y_{i+1}
 /// $$
-#[derive(Clone,Debug)]
-pub struct Histogram<T> {
-    bins: Vec<u64>,
-    intervals: Vec<T>,
+pub struct Histogram<S1,S2,D>
+    where S1: Data,
+          S2: Data,
+{
+    bins: ArrayBase<S1,D>,
+    intervals: ArrayBase<S2,D>,
 }
 
 /// An iterator that fills a histogram and yields the indices of the last data placed in the most
 /// recent bin.
-pub struct HistogramFiller<'a, T: 'a> {
-    data: &'a [T],
+pub struct HistogramFiller<'a, A, D>
+    where A: 'a,
+          D: Dimension
+{
+    data: &'a [A],
     data_indices: Option<&'a [usize]>,
-    offset: usize,
-    interval_iterator: MultiPeek<Iter<'a, T>>,
-    a: Option<T>,
-    b: Option<T>,
-    bin_iterator: IterMut<'a, u64>,
-    bin_mut: Option<&'a mut u64>,
     binned: Vec<bool>,
     binned_indices: Vec<usize>,
+    offset: usize,
+    interval_iterator: MultiPeek<Iter<'a, A, D>>,
+    a: Option<A>,
+    b: Option<A>,
+    bin_iterator: IterMut<'a, u64, D>,
+    bin_mut: Option<&'a mut u64>,
 }
 
-impl Histogram<f64>
+impl<S1,S2> Histogram<S1,S2,Ix1>
+    where S1: DataMut<Elem=u64>,
+          S2: Data<Elem=f64>
 {
     /// Return a reference to the `bins` field.
-    pub fn bins_ref(&self) -> &Vec<u64> {
+    pub fn bins_ref(&self) -> &ArrayBase<S1,Ix1> {
         &self.bins
     }
 
     /// Clears the counts in the histogram.
     pub fn clear(&mut self) -> &mut Self {
-        self.bins.iter_mut().foreach(|e| *e = 0);
+        self.bins.fill(0);
         self
     }
 
@@ -65,6 +73,23 @@ impl Histogram<f64>
         while let Some(_) = histogram_filler.next() { }
     }
 
+    /// Return a reference to the `intervals` field.
+    pub fn intervals_ref(&self) -> &ArrayBase<S2,Ix1> {
+        &self.intervals
+    }
+
+    pub fn new(bins: ArrayBase<S1,Ix1>, intervals: ArrayBase<S2,Ix1>) -> Self {
+        Histogram {
+            bins,
+            intervals,
+        }
+    }
+}
+
+impl<S1,S2> Histogram<S1,S2,Ix1>
+    where S1: DataMut<Elem=u64> + DataOwned<Elem=u64>,
+          S2: Data<Elem=f64> + DataOwned<Elem=f64>
+{
     /// Constructs a histogram by placing an array of data `xs` into `n` equally spaced bins.
     pub fn from_data(xs: &[f64], n: usize) -> Self {
         let mut histogram = Histogram::from_data_empty(xs, n);
@@ -75,7 +100,7 @@ impl Histogram<f64>
     /// Constructs a empty Histogram of `n` bins with the minimum and maximum found in `xs`.
     pub fn from_data_empty(xs: &[f64], n: usize) -> Self {
         let (min,max) = xs.iter().fold(
-            (xs[0],xs[0]),
+            (xs[0], xs[0]),
             |(min,max), x| {
                 if *x <= min {
                     (*x,max)
@@ -86,25 +111,14 @@ impl Histogram<f64>
                 }
         });
 
-        Histogram::new(min, max, n)
-    }
-
-    /// Return a reference to the `intervals` field.
-    pub fn intervals_ref(&self) -> &Vec<f64> {
-        &self.intervals
-    }
-
-    /// Returns the number of bins in the histogram.
-    pub fn len(&self) -> usize {
-        self.bins.len()
+        Histogram::from_bounds(min, max, n)
     }
 
     /// Constructs an empty histogram of `n` bins by evenly partitioning the interval [min,max].
-    pub fn new(min: f64, max: f64, n: usize) -> Self {
-        let intervals: Array1<f64> = Array1::linspace(min, max, n+1);
-        let bins = vec![0;n];
+    pub fn from_bounds(min: f64, max: f64, n: usize) -> Self {
+        let intervals = ArrayBase::linspace(min, max, n+1);
+        let bins = ArrayBase::zeros(n);
 
-        let intervals = intervals.into_raw_vec();
         Histogram {
             bins,
             intervals,
@@ -112,9 +126,24 @@ impl Histogram<f64>
     }
 }
 
-impl<'a> HistogramFiller<'a, f64> {
+impl<S1: DataClone, S2: DataClone, D: Clone> Clone for Histogram<S1, S2, D>
+{
+    fn clone(&self) -> Self {
+        Histogram {
+            bins: self.bins.clone(),
+            intervals: self.intervals.clone(),
+        }
+    }
+}
+
+impl<'a, D> HistogramFiller<'a, f64, D>
+    where D: Dimension
+{
     /// Create a new `HistogramFiller` which assigns `data` to the bins of `histogram`.
-    pub fn new(data: &'a [f64], histogram: &'a mut Histogram<f64>) -> Self {
+    pub fn new<S1, S2>(data: &'a [f64], histogram: &'a mut Histogram<S1, S2, D>) -> Self
+    where S1: DataMut<Elem=u64>,
+          S2: Data<Elem=f64>
+    {
         let data_indices = None;
         let offset = 0;
 
@@ -123,6 +152,7 @@ impl<'a> HistogramFiller<'a, f64> {
 
         let intervals_iter = histogram.intervals.iter();
         let interval_iterator = multipeek(intervals_iter);
+
         let a = None;
         let b = None;
 
@@ -132,23 +162,20 @@ impl<'a> HistogramFiller<'a, f64> {
         HistogramFiller {
             data,
             data_indices,
+            binned,
+            binned_indices,
             offset,
             interval_iterator,
             a,
             b,
             bin_iterator,
             bin_mut,
-            binned,
-            binned_indices,
         }
     }
 
     /// Sets the `data_indices` field.
-    ///
-    /// Also shortens the `binned` mask to the same length as `data_indices`.
     pub fn data_indices(&mut self, data_indices: &'a [usize]) -> &mut Self {
         self.data_indices = Some(data_indices);
-        self.binned = vec![false; data_indices.len()];
         self
     }
 
@@ -224,7 +251,10 @@ impl<'a> HistogramFiller<'a, f64> {
     }
 }
 
-impl<'a> StreamingIterator for HistogramFiller<'a, f64> {
+
+impl<'a, D> StreamingIterator for HistogramFiller<'a, f64, D>
+    where D: Dimension
+{
     type Item = [usize];
 
     fn advance(&mut self) {
@@ -265,7 +295,6 @@ impl<'a> StreamingIterator for HistogramFiller<'a, f64> {
 
     fn get(&self) -> Option<&Self::Item> {
         if self.a.is_some() && self.b.is_some() {
-            println!("{:?}, {:?}", self.a, self.b);
             Some(&self.binned_indices)
         } else {
             None
@@ -294,24 +323,33 @@ fn trapezoid(y: &[f64], x: &[f64]) -> f64 {
 
 #[cfg(test)]
 mod tests {
+    use ndarray::prelude::*;
     use streaming_iterator::StreamingIterator;
+    use super::{Histogram,HistogramFiller};
 
     #[test]
     fn histogram() {
         let xs = vec![0.0,1.0,2.0,3.0,0.0,1.0,2.0,0.0,1.0];
-        let hist = super::Histogram::from_data(&xs, 4);
-        assert_eq!(hist.bins, vec![3,3,2,1]);
+        let hist: Histogram<Vec<u64>, Vec<f64>, Ix1> = Histogram::from_data(&xs, 4);
+        assert_eq!(hist.bins.into_raw_vec(), vec![3,3,2,1]);
     }
 
     #[test]
     fn histogram_filler() {
         let xs = vec![0.0,1.0,2.0,3.0,0.0,1.0,2.0,0.0,1.0];
-        let mut hist = super::Histogram::from_data_empty(&xs, 4);
-        let mut hist_filler = super::HistogramFiller::new(&xs, &mut hist);
+        let mut hist: Histogram<Vec<u64>, Vec<f64>, Ix1> = Histogram::from_data_empty(&xs, 4);
+        let mut hist_filler = HistogramFiller::new(&xs, &mut hist);
         assert_eq!(hist_filler.next(), Some(&[0,4,7][..]));
         assert_eq!(hist_filler.next(), Some(&[1,5,8][..]));
         assert_eq!(hist_filler.next(), Some(&[2,6][..]));
         assert_eq!(hist_filler.next(), Some(&[3][..]));
         assert_eq!(hist_filler.next(), None);
+    }
+
+    #[test]
+    fn histogram_clone() {
+        let xs = vec![0.0,1.0,2.0,3.0,0.0,1.0,2.0,0.0,1.0];
+        let hist: Histogram<Vec<u64>, Vec<f64>, Ix1> = Histogram::from_data(&xs, 4);
+        let cloned = hist.clone();
     }
 }
