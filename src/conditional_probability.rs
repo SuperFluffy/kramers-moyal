@@ -9,10 +9,6 @@ use streaming_iterator::StreamingIterator;
 /// The `bins` (i.e. the probability masses $p_j$ of a quantity $x$ falling into the range
 /// $[y_j,y_{j+1})$) of all histograms have to be all the same (which means their number and
 /// definition via `intervals` have to match up).
-///
-/// **TODO:** This data structure is inefficient as the `intervals` field is going to be exactly the same
-/// in all histograms, and also because there is a lot of indirection due to `Vec`s inside a `Vec` (via `Histogram`).
-/// It should be flatted by using an `ndarray`.
 pub struct ConditionalProbabilities<T> {
     histograms: Vec<Histogram<T>>,
     histogram: Histogram<T>,
